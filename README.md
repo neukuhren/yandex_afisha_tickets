@@ -29,6 +29,16 @@ export DB_PASSWORD=...
 bash deploy/install.sh
 ```
 
+Обновление с GitHub (публичный репозиторий):
+
+```bash
+SSHPASS=... ./deploy/remote_update.sh
+# или на сервере:
+cd /opt/yandex_afisha_tickets && git pull && systemctl restart yandex-afisha-bot
+```
+
+Ветка по умолчанию: `cursor/yandex-afisha-tickets-bot-5aac` (до мержа в `master`).
+
 ## Переменные окружения
 
 | Переменная | Описание |

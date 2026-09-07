@@ -2,6 +2,8 @@
 set -euo pipefail
 
 APP_DIR="/opt/yandex_afisha_tickets"
+REPO_URL="${REPO_URL:-https://github.com/neukuhren/yandex_afisha_tickets.git}"
+REPO_BRANCH="${REPO_BRANCH:-cursor/yandex-afisha-tickets-bot-5aac}"
 DB_NAME="afisha_tickets"
 DB_USER="afisha"
 DB_PASSWORD="${DB_PASSWORD:-afisha_secure_pass_change_me}"
@@ -17,14 +19,28 @@ fi
 
 mkdir -p "$APP_DIR"
 
+if [ -d "$APP_DIR/.git" ]; then
+  cd "$APP_DIR"
+  git fetch origin "$REPO_BRANCH"
+  git checkout "$REPO_BRANCH"
+  git reset --hard "origin/$REPO_BRANCH"
+elif [ ! -f "$APP_DIR/main.py" ]; then
+  rm -rf "$APP_DIR"
+  git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"
+  cd "$APP_DIR"
+else
+  cd "$APP_DIR"
+fi
+
 runuser -u postgres -- psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || \
   runuser -u postgres -- psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASSWORD}';"
 runuser -u postgres -- psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || \
   runuser -u postgres -- psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
 
 cd "$APP_DIR"
-rm -rf .venv
-python3 -m venv .venv
+if [ ! -d .venv ]; then
+  python3 -m venv .venv
+fi
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 
