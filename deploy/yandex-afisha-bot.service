@@ -1,0 +1,18 @@
+[Unit]
+Description=Yandex Afisha Tickets Telegram Bot
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=afisha
+Group=afisha
+WorkingDirectory=/opt/yandex_afisha_tickets
+EnvironmentFile=/opt/yandex_afisha_tickets/.env
+Environment=PYTHONPATH=/opt/yandex_afisha_tickets
+ExecStart=/opt/yandex_afisha_tickets/.venv/bin/python /opt/yandex_afisha_tickets/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
