@@ -26,6 +26,9 @@ class TrackedEvent(Base):
     venue_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     venue_address: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     session_datetime: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    pending_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pending_sessions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

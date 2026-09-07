@@ -41,6 +41,23 @@ class EventMeta:
     sale_status: str
 
 
+@dataclass
+class AfishaPageInfo:
+    title: str
+    region_id: int
+    source_url: str
+
+
+@dataclass
+class ResolvedEventInput:
+    source_url: str
+    widget_event_id: int
+    region_id: int
+    client_key: str | None
+    title: str
+    is_afisha_page: bool
+
+
 class AfishaParserError(Exception):
     pass
 
@@ -116,11 +133,93 @@ class AfishaClient:
 
         if event_match:
             raise AfishaParserError(
-                "Событие найдено на Афише, но билеты ещё не подключены к виджету. "
-                "Попробуйте позже или добавьте прямую ссылку на виджет."
+                "Событие найдено на Афише, но билеты ещё не подключены к виджету."
             )
 
         raise AfishaParserError("Не удалось определить параметры события по ссылке Афиши")
+
+    async def resolve_afisha_page(self, url: str) -> AfishaPageInfo:
+        response = await self._client.get(url)
+        response.raise_for_status()
+        html = response.text
+
+        title_match = re.search(
+            r'"Event:[^"]+"\s*:\s*\{[^}]*"title"\s*:\s*"([^"]+)"',
+            html,
+        )
+        if not title_match:
+            title_match = re.search(r"<title>Билеты на «([^»]+)»", html)
+        title = title_match.group(1) if title_match else "Событие на Афише"
+
+        city_match = re.search(r'"cityInfo\(\{\\"id\\":\\"([^"\\]+)\\"\}\)"', html)
+        region_id = 47
+        if city_match:
+            region_id = await self._resolve_city_region(city_match.group(1))
+
+        return AfishaPageInfo(title=title, region_id=region_id, source_url=url)
+
+    async def resolve_event_input(self, url: str) -> ResolvedEventInput:
+        if "widget.afisha.yandex.ru" in url:
+            parsed = self.parse_widget_url(url)
+            meta = await self.get_event_meta(parsed.event_id, parsed.region_id, parsed.client_key)
+            return ResolvedEventInput(
+                source_url=url,
+                widget_event_id=parsed.event_id,
+                region_id=parsed.region_id,
+                client_key=meta.client_key,
+                title=meta.name,
+                is_afisha_page=False,
+            )
+
+        try:
+            parsed = await self.resolve_afisha_url(url)
+            if parsed.event_id > 0:
+                meta = await self.get_event_meta(parsed.event_id, parsed.region_id, parsed.client_key)
+                return ResolvedEventInput(
+                    source_url=url,
+                    widget_event_id=parsed.event_id,
+                    region_id=parsed.region_id,
+                    client_key=meta.client_key,
+                    title=meta.name,
+                    is_afisha_page=True,
+                )
+        except AfishaParserError:
+            pass
+
+        page = await self.resolve_afisha_page(url)
+        return ResolvedEventInput(
+            source_url=url,
+            widget_event_id=0,
+            region_id=page.region_id,
+            client_key=None,
+            title=page.title,
+            is_afisha_page=True,
+        )
+
+    async def discover_sessions(
+        self, event_id: int, region_id: int, client_key: str | None
+    ) -> tuple[EventMeta, list[SessionInfo]]:
+        meta = await self.get_event_meta(event_id, region_id, client_key)
+        if not meta.presentation_dates:
+            return meta, []
+
+        sessions = await self.list_sessions(
+            meta.event_id,
+            meta.region_id,
+            meta.client_key,
+            meta.presentation_dates[0],
+            meta.presentation_dates[-1],
+        )
+        return meta, sessions
+
+    async def try_resolve_widget_from_afisha(self, url: str) -> ParsedWidgetUrl | None:
+        try:
+            parsed = await self.resolve_afisha_url(url)
+            if parsed.event_id > 0:
+                return parsed
+        except AfishaParserError:
+            return None
+        return None
 
     async def _resolve_city_region(self, city_slug: str) -> int:
         city_map = {

@@ -6,7 +6,7 @@ import logging
 
 from src.config import get_settings
 from src.db.repository import Database
-from src.parser.afisha_client import AfishaClient, AfishaParserError
+from src.parser.afisha_client import AfishaClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,39 +23,50 @@ async def seed_url(db: Database, parser: AfishaClient, url: str) -> None:
         logger.info("Уже есть: %s", url)
         return
 
-    if "widget.afisha.yandex.ru" in url:
-        parsed = parser.parse_widget_url(url)
-    else:
-        parsed = await parser.resolve_afisha_url(url)
+    resolved = await parser.resolve_event_input(url)
+    if resolved.widget_event_id > 0:
+        duplicate = await db.get_event_by_widget_id(resolved.widget_event_id)
+        if duplicate:
+            logger.info("Уже отслеживается по widget id: %s", resolved.widget_event_id)
+            return
 
-    meta = await parser.get_event_meta(parsed.event_id, parsed.region_id, parsed.client_key)
-    if not meta.presentation_dates:
-        raise AfishaParserError("Нет дат презентации")
+    sessions = []
+    meta = None
+    if resolved.widget_event_id > 0:
+        meta, sessions = await parser.discover_sessions(
+            resolved.widget_event_id,
+            resolved.region_id,
+            resolved.client_key,
+        )
 
-    sessions = await parser.list_sessions(
-        meta.event_id,
-        meta.region_id,
-        meta.client_key,
-        meta.presentation_dates[0],
-        meta.presentation_dates[-1],
-    )
-    if not sessions:
-        raise AfishaParserError("Нет сеансов")
+    if sessions:
+        session = sessions[0]
+        await db.create_event(
+            source_url=url,
+            widget_event_id=resolved.widget_event_id,
+            region_id=resolved.region_id,
+            client_key=meta.client_key if meta else (resolved.client_key or ""),
+            session_key=session.key,
+            session_id=session.session_id,
+            title=resolved.title,
+            venue_name=session.venue_name,
+            venue_address=session.venue_address,
+            session_datetime=session.session_date,
+        )
+        logger.info("Добавлено: %s (%s)", resolved.title, session.session_date)
+        return
 
-    session = sessions[0]
-    await db.create_event(
+    pending_reason = "no_widget" if resolved.widget_event_id <= 0 else "no_sessions"
+    client_key = resolved.client_key or (meta.client_key if meta else "")
+    await db.create_pending_event(
         source_url=url,
-        widget_event_id=meta.event_id,
-        region_id=meta.region_id,
-        client_key=meta.client_key,
-        session_key=session.key,
-        session_id=session.session_id,
-        title=meta.name,
-        venue_name=session.venue_name,
-        venue_address=session.venue_address,
-        session_datetime=session.session_date,
+        widget_event_id=resolved.widget_event_id,
+        region_id=resolved.region_id,
+        client_key=client_key,
+        title=resolved.title,
+        pending_reason=pending_reason,
     )
-    logger.info("Добавлено: %s (%s)", meta.name, session.session_date)
+    logger.info("Добавлено в ожидание: %s (%s)", resolved.title, pending_reason)
 
 
 async def main() -> None:

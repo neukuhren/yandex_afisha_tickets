@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import selectinload
 
 from src.config import Settings, all_admin_ids
+from src.db.migrations import run_migrations
 from src.db.models import AppearanceAlert, Base, BotUser, TicketSnapshotRow, TrackedEvent, UserEventSubscription
 from src.parser.aggregator import TicketLot, TicketSnapshot
 
@@ -19,6 +20,7 @@ class Database:
     async def init(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await run_migrations(self.engine)
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -65,6 +67,14 @@ class Database:
                 select(TrackedEvent).where(TrackedEvent.source_url == source_url)
             )
 
+    async def get_event_by_widget_id(self, widget_event_id: int) -> TrackedEvent | None:
+        if widget_event_id <= 0:
+            return None
+        async with self.session_factory() as session:
+            return await session.scalar(
+                select(TrackedEvent).where(TrackedEvent.widget_event_id == widget_event_id)
+            )
+
     async def create_event(
         self,
         *,
@@ -78,6 +88,8 @@ class Database:
         venue_name: str,
         venue_address: str,
         session_datetime: str,
+        status: str = "active",
+        pending_reason: str | None = None,
     ) -> TrackedEvent:
         async with self.session_factory() as session:
             event = TrackedEvent(
@@ -91,6 +103,9 @@ class Database:
                 venue_name=venue_name,
                 venue_address=venue_address,
                 session_datetime=session_datetime,
+                status=status,
+                pending_reason=pending_reason,
+                pending_sessions=None,
             )
             session.add(event)
             await session.flush()
@@ -104,6 +119,91 @@ class Database:
                         notifications_enabled=True,
                     )
                 )
+            await session.commit()
+            await session.refresh(event)
+            return event
+
+    async def create_pending_event(
+        self,
+        *,
+        source_url: str,
+        widget_event_id: int,
+        region_id: int,
+        client_key: str,
+        title: str,
+        pending_reason: str,
+    ) -> TrackedEvent:
+        return await self.create_event(
+            source_url=source_url,
+            widget_event_id=widget_event_id,
+            region_id=region_id,
+            client_key=client_key,
+            session_key="",
+            session_id=0,
+            title=title,
+            venue_name="",
+            venue_address="",
+            session_datetime="",
+            status="pending",
+            pending_reason=pending_reason,
+        )
+
+    async def update_event_widget(
+        self,
+        event_id: int,
+        *,
+        widget_event_id: int,
+        region_id: int,
+        client_key: str,
+        title: str | None = None,
+    ) -> None:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return
+            event.widget_event_id = widget_event_id
+            event.region_id = region_id
+            event.client_key = client_key
+            if title:
+                event.title = title
+            if event.pending_reason == "no_widget":
+                event.pending_reason = "no_sessions"
+            await session.commit()
+
+    async def set_pending_sessions(self, event_id: int, sessions: list[dict]) -> None:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return
+            event.pending_sessions = {"items": sessions}
+            event.status = "awaiting_session"
+            await session.commit()
+
+    async def activate_event_session(
+        self,
+        event_id: int,
+        *,
+        session_key: str,
+        session_id: int,
+        venue_name: str,
+        venue_address: str,
+        session_datetime: str,
+        title: str | None = None,
+    ) -> TrackedEvent | None:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return None
+            event.session_key = session_key
+            event.session_id = session_id
+            event.venue_name = venue_name
+            event.venue_address = venue_address
+            event.session_datetime = session_datetime
+            event.status = "active"
+            event.pending_reason = None
+            event.pending_sessions = None
+            if title:
+                event.title = title
             await session.commit()
             await session.refresh(event)
             return event

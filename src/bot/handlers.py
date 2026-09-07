@@ -90,44 +90,72 @@ def build_router(
 
         url = message.text.strip()
         try:
-            if "widget.afisha.yandex.ru" in url:
-                parsed = parser.parse_widget_url(url)
-            else:
-                parsed = await parser.resolve_afisha_url(url)
+            existing = await db.get_event_by_url(url)
+            if existing:
+                await message.answer("Это событие уже отслеживается.")
+                await state.clear()
+                return
 
-            meta = await parser.get_event_meta(
-                parsed.event_id,
-                parsed.region_id,
-                parsed.client_key,
-            )
-            if not meta.presentation_dates:
-                raise AfishaParserError("У события нет доступных дат сеансов")
+            resolved = await parser.resolve_event_input(url)
+            if resolved.widget_event_id > 0:
+                duplicate = await db.get_event_by_widget_id(resolved.widget_event_id)
+                if duplicate:
+                    await message.answer(
+                        f"Событие уже отслеживается как «{duplicate.title}»."
+                    )
+                    await state.clear()
+                    return
 
-            date_from = meta.presentation_dates[0]
-            date_to = meta.presentation_dates[-1]
-            sessions = await parser.list_sessions(
-                meta.event_id,
-                meta.region_id,
-                meta.client_key,
-                date_from,
-                date_to,
-            )
-            if not sessions:
-                raise AfishaParserError("Не найдено сеансов для выбора")
+            sessions: list = []
+            meta = None
+            if resolved.widget_event_id > 0:
+                meta, sessions = await parser.discover_sessions(
+                    resolved.widget_event_id,
+                    resolved.region_id,
+                    resolved.client_key,
+                )
 
-            await state.update_data(
+            if sessions:
+                await state.update_data(
+                    source_url=url,
+                    widget_event_id=resolved.widget_event_id,
+                    region_id=resolved.region_id,
+                    client_key=resolved.client_key or (meta.client_key if meta else ""),
+                    title=resolved.title,
+                    sessions=[session.__dict__ for session in sessions],
+                )
+                await state.set_state(AddEventStates.choosing_session)
+                await message.answer(
+                    "Выберите сеанс для отслеживания:",
+                    reply_markup=sessions_keyboard(sessions),
+                )
+                return
+
+            pending_reason = "no_widget" if resolved.widget_event_id <= 0 else "no_sessions"
+            client_key = resolved.client_key or ""
+            if resolved.widget_event_id > 0 and meta:
+                client_key = meta.client_key
+
+            event = await db.create_pending_event(
                 source_url=url,
-                widget_event_id=meta.event_id,
-                region_id=meta.region_id,
-                client_key=meta.client_key,
-                title=meta.name,
-                sessions=[session.__dict__ for session in sessions],
+                widget_event_id=resolved.widget_event_id,
+                region_id=resolved.region_id,
+                client_key=client_key,
+                title=resolved.title,
+                pending_reason=pending_reason,
             )
-            await state.set_state(AddEventStates.choosing_session)
-            await message.answer(
-                "Выберите сеанс для отслеживания:",
-                reply_markup=sessions_keyboard(sessions),
-            )
+            await state.clear()
+            if pending_reason == "no_widget":
+                await message.answer(
+                    f"Событие «{event.title}» добавлено в режим ожидания.\n"
+                    "Бот будет проверять появление виджета билетов, сеансов и билетов."
+                )
+            else:
+                await message.answer(
+                    f"Событие «{event.title}» добавлено в режим ожидания.\n"
+                    "Сеансы и даты пока не опубликованы — бот будет следить за их появлением "
+                    "и за появлением билетов."
+                )
         except AfishaParserError as exc:
             await message.answer(f"Ошибка: {exc}")
         except Exception:
@@ -182,6 +210,57 @@ def build_router(
                 f"Площадка: {event.venue_name}"
             )
         await callback.answer("Добавлено")
+
+    @router.callback_query(F.data.startswith("pick_session:"))
+    async def pick_pending_session(callback: CallbackQuery) -> None:
+        if not callback.from_user or callback.from_user.id != settings.super_admin_id:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        if not callback.data:
+            return
+
+        parts = callback.data.split(":")
+        if len(parts) < 3:
+            await callback.answer("Некорректные данные", show_alert=True)
+            return
+
+        action = parts[-1]
+        event_id = int(parts[1])
+        if action == "cancel":
+            await callback.answer("Отменено")
+            if callback.message:
+                await callback.message.edit_text("Выбор сеанса отменён.")
+            return
+
+        event = await db.get_event(event_id)
+        if not event or not event.pending_sessions:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+
+        sessions_data = event.pending_sessions.get("items", [])
+        index = int(action)
+        if index < 0 or index >= len(sessions_data):
+            await callback.answer("Некорректный сеанс", show_alert=True)
+            return
+
+        session = sessions_data[index]
+        activated = await db.activate_event_session(
+            event_id,
+            session_key=session["key"],
+            session_id=session["session_id"],
+            venue_name=session.get("venue_name", ""),
+            venue_address=session.get("venue_address", ""),
+            session_datetime=session.get("session_date", ""),
+            title=event.title,
+        )
+        if callback.message:
+            await callback.message.edit_text(
+                f"Событие активировано: {activated.title if activated else event.title}\n"
+                f"Сеанс: {session.get('session_date', '')}\n"
+                f"Площадка: {session.get('venue_name', '')}\n"
+                "Мониторинг билетов запущен."
+            )
+        await callback.answer("Сеанс выбран")
 
     return router
 

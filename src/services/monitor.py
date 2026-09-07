@@ -11,6 +11,7 @@ from src.db.repository import Database
 from src.parser.afisha_client import AfishaClient
 from src.parser.aggregator import TicketSnapshot
 from src.services.notifier import NotificationService
+from src.services.pending import PendingEventService
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class MonitorService:
         self.settings = settings
         self.parser = parser
         self.notifier = notifier
+        self.pending = PendingEventService(bot, db, settings, parser)
         self._parse_task: asyncio.Task | None = None
         self._appearance_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -80,26 +82,39 @@ class MonitorService:
         events = await self.db.list_active_events()
         for event in events:
             try:
-                await self._process_event(event.id)
+                if event.status != "active" or not event.session_key:
+                    await self.pending.process(event)
+                    continue
+                await self._process_active_event(event.id)
             except Exception:
                 logger.exception("Ошибка парсинга события %s", event.id)
 
-    async def _process_event(self, event_id: int) -> None:
+    async def _process_active_event(self, event_id: int) -> None:
         event = await self.db.get_event(event_id)
-        if not event:
+        if not event or not event.session_key:
             return
 
-        sessions = await self.parser.list_sessions(
-            event.widget_event_id,
-            event.region_id,
-            event.client_key,
-            event.session_datetime[:10],
-            event.session_datetime[:10],
-        )
+        date_hint = event.session_datetime[:10] if event.session_datetime else ""
+        sessions = []
+        if date_hint:
+            sessions = await self.parser.list_sessions(
+                event.widget_event_id,
+                event.region_id,
+                event.client_key,
+                date_hint,
+                date_hint,
+            )
         session = next((item for item in sessions if item.key == event.session_key), None)
         if not session:
-            logger.warning("Сеанс не найден для события %s", event.id)
-            return
+            meta, discovered = await self.parser.discover_sessions(
+                event.widget_event_id,
+                event.region_id,
+                event.client_key or None,
+            )
+            session = next((item for item in discovered if item.key == event.session_key), None)
+            if not session:
+                logger.warning("Сеанс не найден для события %s", event.id)
+                return
 
         current = await self.parser.fetch_ticket_snapshot(
             event.session_key,
@@ -162,8 +177,8 @@ class MonitorService:
     def _is_appearance(previous: TicketSnapshot, current: TicketSnapshot) -> bool:
         zero_to_positive = previous.total_count == 0 and current.total_count > 0
         status_changed = (
-            previous.sale_status in {"no-seats", "closed", "sold-out", "unknown"}
-            and current.sale_status == "available"
+            previous.sale_status in {"no-seats", "closed", "sold-out", "unknown", "no-sessions"}
+            and current.sale_status in {"available", "no-seats"}
             and current.total_count > 0
         )
         return zero_to_positive or status_changed
