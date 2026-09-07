@@ -16,17 +16,17 @@ if ! id afisha >/dev/null 2>&1; then
 fi
 
 mkdir -p "$APP_DIR"
-chown -R afisha:afisha "$APP_DIR"
 
-sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASSWORD}';"
-sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+runuser -u postgres -- psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || \
+  runuser -u postgres -- psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASSWORD}';"
+runuser -u postgres -- psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || \
+  runuser -u postgres -- psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
 
 cd "$APP_DIR"
+rm -rf .venv
 python3 -m venv .venv
-. .venv/bin/pip install --upgrade pip
-. .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
 
 if [ ! -f .env ]; then
   cat > .env <<EOF
@@ -42,7 +42,7 @@ EOF
   chmod 600 .env
 fi
 
-PYTHONPATH=. . .venv/bin/python scripts/seed_initial_events.py || true
+PYTHONPATH=. .venv/bin/python scripts/seed_initial_events.py || true
 
 cp deploy/yandex-afisha-bot.service /etc/systemd/system/yandex-afisha-bot.service
 chown -R afisha:afisha "$APP_DIR"
