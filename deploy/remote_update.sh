@@ -16,6 +16,8 @@ APP_DIR="$APP_DIR"
 REPO_URL="$REPO_URL"
 BRANCH="$BRANCH"
 
+git config --global --add safe.directory "\$APP_DIR" 2>/dev/null || true
+
 if [ -d "\$APP_DIR/.git" ]; then
   cd "\$APP_DIR"
   git fetch origin "\$BRANCH"
