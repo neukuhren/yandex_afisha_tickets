@@ -5,7 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BotCommand, BotCommandScopeChat, CallbackQuery, Message
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, CallbackQuery, Message
 
 from src.bot.keyboards import events_keyboard, sessions_keyboard
 from src.bot.states import AddEventStates
@@ -270,11 +270,21 @@ async def setup_bot_commands(bot, settings: Settings) -> None:
         BotCommand(command="start", description="Запуск бота"),
         BotCommand(command="events", description="Управление оповещениями"),
     ]
-    await bot.set_my_commands(default_commands)
-
     super_admin_commands = default_commands + [
         BotCommand(command="add_url", description="Добавить событие"),
     ]
+
+    # Меню по умолчанию для всех приватных чатов — без /add_url.
+    await bot.set_my_commands(default_commands, scope=BotCommandScopeDefault())
+
+    # Явно задаём меню каждому обычному админу — только /start и /events.
+    for admin_id in settings.admin_ids:
+        await bot.set_my_commands(
+            default_commands,
+            scope=BotCommandScopeChat(chat_id=admin_id),
+        )
+
+    # Суперадмин видит /add_url только в своём чате.
     await bot.set_my_commands(
         super_admin_commands,
         scope=BotCommandScopeChat(chat_id=settings.super_admin_id),
