@@ -8,7 +8,7 @@ set -euo pipefail
 SERVER="${SERVER:-root@144.31.75.106}"
 APP_DIR="${APP_DIR:-/opt/yandex_afisha_tickets}"
 REPO_URL="${REPO_URL:-https://github.com/neukuhren/yandex_afisha_tickets.git}"
-BRANCH="${BRANCH:-cursor/yandex-afisha-tickets-bot-5aac}"
+BRANCH="${BRANCH:-master}"
 
 sshpass -e ssh -o StrictHostKeyChecking=no "$SERVER" bash -s <<REMOTE
 set -euo pipefail
