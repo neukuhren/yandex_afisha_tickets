@@ -10,6 +10,7 @@ from src.config import Settings
 from src.db.repository import Database
 from src.parser.afisha_client import AfishaClient
 from src.parser.aggregator import TicketSnapshot
+from src.services.notification_filters import filter_event_snapshot
 from src.services.notifier import NotificationService
 from src.services.pending import PendingEventService
 
@@ -124,21 +125,32 @@ class MonitorService:
         )
         previous = await self.db.get_latest_snapshot(event.id)
 
+        sectors = [lot.sector for lot in current.lots]
+        if sectors:
+            await self.db.update_known_sectors(event.id, sectors)
+
         if previous is None:
             await self.db.save_snapshot(event.id, current)
             return
 
-        appearance_triggered = self._is_appearance(previous, current)
-        changed = previous.as_map() != current.as_map() or previous.sale_status != current.sale_status
+        event = await self.db.get_event(event.id) or event
+        prev_filtered = filter_event_snapshot(event, previous)
+        curr_filtered = filter_event_snapshot(event, current)
+
+        appearance_triggered = self._is_appearance(prev_filtered, curr_filtered)
+        full_changed = previous.as_map() != current.as_map() or previous.sale_status != current.sale_status
+        filtered_changed = prev_filtered.as_map() != curr_filtered.as_map()
 
         await self.db.save_snapshot(event.id, current)
 
-        if not changed:
+        if not full_changed:
+            return
+        if not filtered_changed and not appearance_triggered:
             return
 
         recipients = await self.db.list_notification_recipients(event.id)
-        if appearance_triggered:
-            episode_key = self.notifier.build_episode_key(current)
+        if appearance_triggered and curr_filtered.total_count > 0:
+            episode_key = self.notifier.build_episode_key(curr_filtered)
             await self.db.create_appearance_alerts(
                 event.id,
                 episode_key,
@@ -168,7 +180,10 @@ class MonitorService:
                     continue
 
             snapshot = await self.db.get_latest_snapshot(alert.event_id)
-            if not snapshot or snapshot.total_count <= 0:
+            if not snapshot:
+                continue
+            filtered = filter_event_snapshot(alert.event, snapshot)
+            if filtered.total_count <= 0:
                 continue
 
             await self.notifier.send_appearance_notification(alert.event, snapshot, alert)

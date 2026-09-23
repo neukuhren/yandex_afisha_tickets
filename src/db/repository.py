@@ -55,6 +55,76 @@ class Database:
             )
             return list(result)
 
+    async def list_all_tracked_events(self) -> list[TrackedEvent]:
+        async with self.session_factory() as session:
+            result = await session.scalars(
+                select(TrackedEvent)
+                .where(TrackedEvent.is_active.is_(True))
+                .order_by(TrackedEvent.id)
+            )
+            return list(result)
+
+    async def deactivate_event(self, event_id: int) -> bool:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return False
+            event.is_active = False
+            await session.commit()
+            return True
+
+    async def update_known_sectors(self, event_id: int, sectors: list[str]) -> None:
+        merged = sorted(set(sectors))
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return
+            existing = set(event.known_sectors or [])
+            combined = sorted(existing | set(merged))
+            if combined != (event.known_sectors or []):
+                event.known_sectors = combined
+                await session.commit()
+
+    async def set_notify_price_bounds(
+        self,
+        event_id: int,
+        *,
+        price_min_rub: int | None = None,
+        price_max_rub: int | None = None,
+        clear_min: bool = False,
+        clear_max: bool = False,
+    ) -> TrackedEvent | None:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return None
+            if clear_min:
+                event.notify_price_min_rub = None
+            elif price_min_rub is not None:
+                event.notify_price_min_rub = price_min_rub
+            if clear_max:
+                event.notify_price_max_rub = None
+            elif price_max_rub is not None:
+                event.notify_price_max_rub = price_max_rub
+            await session.commit()
+            await session.refresh(event)
+            return event
+
+    async def toggle_sector_exclusion(self, event_id: int, sector: str) -> TrackedEvent | None:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return None
+            excluded = list(event.notify_excluded_sectors or [])
+            if sector in excluded:
+                excluded = [s for s in excluded if s != sector]
+            else:
+                excluded.append(sector)
+            event.notify_excluded_sectors = excluded
+            await session.commit()
+            await session.refresh(event)
+            return event
+
     async def get_event(self, event_id: int) -> TrackedEvent | None:
         async with self.session_factory() as session:
             return await session.scalar(

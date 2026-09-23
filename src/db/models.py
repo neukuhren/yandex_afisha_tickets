@@ -30,6 +30,10 @@ class TrackedEvent(Base):
     pending_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pending_sessions: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notify_price_min_rub: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notify_price_max_rub: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notify_excluded_sectors: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    known_sectors: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     snapshots: Mapped[list[TicketSnapshotRow]] = relationship(back_populates="event")

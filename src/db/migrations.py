@@ -12,6 +12,10 @@ async def run_migrations(engine) -> None:
         "ALTER TABLE tracked_events ADD COLUMN IF NOT EXISTS pending_sessions JSONB",
         "UPDATE tracked_events SET status = 'active' WHERE status IS NULL OR status = ''",
         "UPDATE tracked_events SET status = 'active' WHERE session_key IS NOT NULL AND session_key != '' AND status = 'pending'",
+        "ALTER TABLE tracked_events ADD COLUMN IF NOT EXISTS notify_price_min_rub INTEGER",
+        "ALTER TABLE tracked_events ADD COLUMN IF NOT EXISTS notify_price_max_rub INTEGER",
+        "ALTER TABLE tracked_events ADD COLUMN IF NOT EXISTS notify_excluded_sectors JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "ALTER TABLE tracked_events ADD COLUMN IF NOT EXISTS known_sectors JSONB NOT NULL DEFAULT '[]'::jsonb",
     ]
     async with engine.begin() as conn:
         for statement in statements:

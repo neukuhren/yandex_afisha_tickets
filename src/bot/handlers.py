@@ -7,13 +7,27 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, CallbackQuery, Message
 
-from src.bot.keyboards import events_keyboard, sessions_keyboard
-from src.bot.states import AddEventStates
+from src.bot.keyboards import (
+    admin_events_keyboard,
+    delete_confirm_keyboard,
+    events_keyboard,
+    filters_menu_keyboard,
+    manage_event_keyboard,
+    post_add_filters_keyboard,
+    price_bound_actions_keyboard,
+    sectors_keyboard,
+    sessions_keyboard,
+)
+from src.bot.states import AddEventStates, FilterPriceStates
 from src.config import Settings
 from src.db.repository import Database
 from src.parser.afisha_client import AfishaClient, AfishaParserError
 
 logger = logging.getLogger(__name__)
+
+
+def _is_super_admin(user_id: int, settings: Settings) -> bool:
+    return user_id == settings.super_admin_id
 
 
 def build_router(
@@ -30,8 +44,12 @@ def build_router(
             "Команды:\n"
             "/events — управление оповещениями по событиям"
         )
-        if message.from_user and message.from_user.id == settings.super_admin_id:
-            await message.answer("Суперадмин: /add_url — добавить событие для отслеживания")
+        if message.from_user and _is_super_admin(message.from_user.id, settings):
+            await message.answer(
+                "Суперадмин:\n"
+                "/add_url — добавить событие\n"
+                "/manage_events — удаление и фильтры оповещений"
+            )
 
     @router.message(Command("events"))
     async def cmd_events(message: Message) -> None:
@@ -75,9 +93,22 @@ def build_router(
         else:
             await callback.answer("Не удалось подтвердить", show_alert=True)
 
+    @router.message(Command("manage_events"))
+    async def cmd_manage_events(message: Message) -> None:
+        if not message.from_user or not _is_super_admin(message.from_user.id, settings):
+            return
+        events = await db.list_all_tracked_events()
+        if not events:
+            await message.answer("Нет событий для управления.")
+            return
+        await message.answer(
+            "Выберите событие (удаление и фильтры оповещений):",
+            reply_markup=admin_events_keyboard(events),
+        )
+
     @router.message(Command("add_url"))
     async def cmd_add_url(message: Message, state: FSMContext) -> None:
-        if not message.from_user or message.from_user.id != settings.super_admin_id:
+        if not message.from_user or not _is_super_admin(message.from_user.id, settings):
             return
         await state.set_state(AddEventStates.waiting_for_url)
         await message.answer("Отправьте ссылку на событие Яндекс Афиши или виджет.")
@@ -207,13 +238,15 @@ def build_router(
             await callback.message.edit_text(
                 f"Событие добавлено: {event.title}\n"
                 f"Сеанс: {event.session_datetime}\n"
-                f"Площадка: {event.venue_name}"
+                f"Площадка: {event.venue_name}\n\n"
+                "Можно настроить фильтры оповещений (цена, сектора):",
+                reply_markup=post_add_filters_keyboard(event.id),
             )
         await callback.answer("Добавлено")
 
     @router.callback_query(F.data.startswith("pick_session:"))
     async def pick_pending_session(callback: CallbackQuery) -> None:
-        if not callback.from_user or callback.from_user.id != settings.super_admin_id:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
             await callback.answer("Нет доступа", show_alert=True)
             return
         if not callback.data:
@@ -253,14 +286,281 @@ def build_router(
             session_datetime=session.get("session_date", ""),
             title=event.title,
         )
+        activated_id = activated.id if activated else event_id
         if callback.message:
             await callback.message.edit_text(
                 f"Событие активировано: {activated.title if activated else event.title}\n"
                 f"Сеанс: {session.get('session_date', '')}\n"
                 f"Площадка: {session.get('venue_name', '')}\n"
-                "Мониторинг билетов запущен."
+                "Мониторинг билетов запущен.\n\n"
+                "Можно настроить фильтры оповещений:",
+                reply_markup=post_add_filters_keyboard(activated_id),
             )
         await callback.answer("Сеанс выбран")
+
+    @router.callback_query(F.data == "manage:list")
+    async def manage_list(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        events = await db.list_all_tracked_events()
+        if callback.message:
+            await callback.message.edit_text(
+                "Выберите событие:",
+                reply_markup=admin_events_keyboard(events),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("manage:"))
+    async def manage_event(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        if not callback.data or callback.data == "manage:list":
+            return
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.get_event(event_id)
+        if not event or not event.is_active:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        if callback.message:
+            await callback.message.edit_text(
+                f"Управление: {event.title}\n{event.source_url}",
+                reply_markup=manage_event_keyboard(event_id),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("delask:"))
+    async def delete_ask(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.get_event(event_id)
+        if not event:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        if callback.message:
+            await callback.message.edit_text(
+                f"Удалить «{event.title}» из отслеживания?",
+                reply_markup=delete_confirm_keyboard(event_id),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("delok:"))
+    async def delete_confirm(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.get_event(event_id)
+        if not event:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        await db.deactivate_event(event_id)
+        events = await db.list_all_tracked_events()
+        if callback.message:
+            if events:
+                await callback.message.edit_text(
+                    f"Событие «{event.title}» удалено.\n\nВыберите событие:",
+                    reply_markup=admin_events_keyboard(events),
+                )
+            else:
+                await callback.message.edit_text(f"Событие «{event.title}» удалено. Список пуст.")
+        await callback.answer("Удалено")
+
+    @router.callback_query(F.data.startswith("fskip:"))
+    async def skip_filters(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("Ок")
+
+    @router.callback_query(F.data.startswith("filt:"))
+    async def filters_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        await state.clear()
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.get_event(event_id)
+        if not event:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        snapshot = await db.get_latest_snapshot(event_id)
+        if snapshot:
+            await db.update_known_sectors(event_id, [lot.sector for lot in snapshot.lots])
+            event = await db.get_event(event_id) or event
+        if callback.message:
+            await callback.message.edit_text(
+                f"Фильтры оповещений\n{event.title}\n\n"
+                "Цена — с учётом сервисного сбора. Снимки в БД хранятся полностью.",
+                reply_markup=filters_menu_keyboard(event),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("fmin:"))
+    async def filter_min_start(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        event_id = int(callback.data.split(":", 1)[1])
+        await state.set_state(FilterPriceStates.waiting_min)
+        await state.update_data(filter_event_id=event_id)
+        if callback.message:
+            await callback.message.edit_text(
+                "Введите нижний порог цены в рублях (билеты дешевле не попадут в оповещение).\n"
+                "Или нажмите «Сбросить порог».",
+                reply_markup=price_bound_actions_keyboard(event_id, "min"),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("fmax:"))
+    async def filter_max_start(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        event_id = int(callback.data.split(":", 1)[1])
+        await state.set_state(FilterPriceStates.waiting_max)
+        await state.update_data(filter_event_id=event_id)
+        if callback.message:
+            await callback.message.edit_text(
+                "Введите верхний порог цены в рублях (дороже — не в оповещении).\n"
+                "Или нажмите «Сбросить порог».",
+                reply_markup=price_bound_actions_keyboard(event_id, "max"),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("fclrmin:"))
+    async def filter_clear_min(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        await state.clear()
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.set_notify_price_bounds(event_id, clear_min=True)
+        if not event or not callback.message:
+            await callback.answer("Ошибка")
+            return
+        await callback.message.edit_text(
+            "Нижний порог сброшен.",
+            reply_markup=filters_menu_keyboard(event),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("fclrmax:"))
+    async def filter_clear_max(callback: CallbackQuery, state: FSMContext) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        await state.clear()
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.set_notify_price_bounds(event_id, clear_max=True)
+        if not event or not callback.message:
+            await callback.answer("Ошибка")
+            return
+        await callback.message.edit_text(
+            "Верхний порог сброшен.",
+            reply_markup=filters_menu_keyboard(event),
+        )
+        await callback.answer()
+
+    @router.message(FilterPriceStates.waiting_min)
+    async def filter_min_value(message: Message, state: FSMContext) -> None:
+        if not message.from_user or not _is_super_admin(message.from_user.id, settings):
+            return
+        data = await state.get_data()
+        event_id = data.get("filter_event_id")
+        if not event_id:
+            await state.clear()
+            return
+        try:
+            value = int((message.text or "").strip().replace(" ", ""))
+        except ValueError:
+            await message.answer("Введите целое число рублей.")
+            return
+        if value < 0:
+            await message.answer("Цена не может быть отрицательной.")
+            return
+        event = await db.set_notify_price_bounds(event_id, price_min_rub=value)
+        await state.clear()
+        if event:
+            await message.answer(
+                f"Нижний порог: {value} ₽",
+                reply_markup=filters_menu_keyboard(event),
+            )
+
+    @router.message(FilterPriceStates.waiting_max)
+    async def filter_max_value(message: Message, state: FSMContext) -> None:
+        if not message.from_user or not _is_super_admin(message.from_user.id, settings):
+            return
+        data = await state.get_data()
+        event_id = data.get("filter_event_id")
+        if not event_id:
+            await state.clear()
+            return
+        try:
+            value = int((message.text or "").strip().replace(" ", ""))
+        except ValueError:
+            await message.answer("Введите целое число рублей.")
+            return
+        if value < 0:
+            await message.answer("Цена не может быть отрицательной.")
+            return
+        event = await db.set_notify_price_bounds(event_id, price_max_rub=value)
+        await state.clear()
+        if event:
+            await message.answer(
+                f"Верхний порог: {value} ₽",
+                reply_markup=filters_menu_keyboard(event),
+            )
+
+    @router.callback_query(F.data.startswith("fsec:"))
+    async def filter_sectors(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        event_id = int(callback.data.split(":", 1)[1])
+        event = await db.get_event(event_id)
+        if not event:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        snapshot = await db.get_latest_snapshot(event_id)
+        if snapshot:
+            await db.update_known_sectors(event_id, [lot.sector for lot in snapshot.lots])
+            event = await db.get_event(event_id) or event
+        if callback.message:
+            await callback.message.edit_text(
+                "Нажмите сектор, чтобы исключить или снова включить в оповещения:\n"
+                "✅ — в оповещениях, ❌ — исключён",
+                reply_markup=sectors_keyboard(event),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("fsect:"))
+    async def filter_sector_toggle(callback: CallbackQuery) -> None:
+        if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        parts = callback.data.split(":")
+        event_id = int(parts[1])
+        index = int(parts[2])
+        event = await db.get_event(event_id)
+        if not event:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        sectors = event.known_sectors or []
+        if index < 0 or index >= len(sectors):
+            await callback.answer("Сектор не найден", show_alert=True)
+            return
+        event = await db.toggle_sector_exclusion(event_id, sectors[index])
+        if not event or not callback.message:
+            await callback.answer()
+            return
+        await callback.message.edit_reply_markup(reply_markup=sectors_keyboard(event))
+        await callback.answer("Обновлено")
 
     return router
 
@@ -272,6 +572,7 @@ async def setup_bot_commands(bot, settings: Settings) -> None:
     ]
     super_admin_commands = default_commands + [
         BotCommand(command="add_url", description="Добавить событие"),
+        BotCommand(command="manage_events", description="Удаление и фильтры"),
     ]
 
     # Меню по умолчанию для всех приватных чатов — без /add_url.
