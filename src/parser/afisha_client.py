@@ -101,7 +101,9 @@ class AfishaClient:
         response = await self._client.get(url)
         response.raise_for_status()
         html = response.text
+        return self._parse_afisha_html(html, url)
 
+    def _parse_afisha_html(self, html: str, url: str) -> ParsedWidgetUrl:
         widget_match = re.search(
             r"widget\.afisha\.yandex\.ru/w/events/(\d+)\?([^\"'\s]+)",
             html,
@@ -113,30 +115,46 @@ class AfishaClient:
             client_key = (query.get("clientKey") or query.get("client_key") or [None])[0]
             return ParsedWidgetUrl(event_id=event_id, region_id=region_id, client_key=client_key)
 
-        event_match = re.search(r'"Event:\w+"\s*:\s*\{[^}]*"title"\s*:\s*"([^"]+)"', html)
-        client_key_match = re.search(r'"clientKey"\s*:\s*\{\s*"id"\s*:\s*"([^"]+)"', html)
-        numeric_match = re.search(r'"ticketsEventId"\s*:\s*(\d+)', html)
-        if not numeric_match:
-            numeric_match = re.search(r'widget\.afisha\.yandex\.ru/w/events/(\d+)', html)
+        client_key = self._extract_client_key(html)
+        region_id = self._extract_region_id(html, url)
+        event_id = self._extract_widget_event_id(html)
+        if event_id > 0:
+            return ParsedWidgetUrl(event_id=event_id, region_id=region_id, client_key=client_key)
 
-        city_match = re.search(r'"cityInfo\(\{\\"id\\":\\"([^"\\]+)\\"\}\)"', html)
-        region_id = 47
-        if city_match:
-            region_id = await self._resolve_city_region(city_match.group(1))
-
-        if numeric_match:
-            return ParsedWidgetUrl(
-                event_id=int(numeric_match.group(1)),
-                region_id=region_id,
-                client_key=client_key_match.group(1) if client_key_match else None,
-            )
-
-        if event_match:
+        if re.search(r'"Event:\w+"\s*:\s*\{[^}]*"title"\s*:\s*"([^"]+)"', html):
             raise AfishaParserError(
                 "Событие найдено на Афише, но билеты ещё не подключены к виджету."
             )
 
         raise AfishaParserError("Не удалось определить параметры события по ссылке Афиши")
+
+    @staticmethod
+    def _extract_client_key(html: str) -> str | None:
+        match = re.search(r'"clientKey"\s*:\s*\{\s*"id"\s*:\s*"([^"]+)"', html)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_widget_event_id(html: str) -> int:
+        patterns = (
+            r'"ticketsEventId"\s*:\s*(\d+)',
+            r'widget\.afisha\.yandex\.ru/w/events/(\d+)',
+            r'"tickets"\s*:\s*\[\s*\{\s*"id"\s*:\s*"(\d+)"',
+            r'"ticket"\s*:\s*\{\s*"id"\s*:\s*"(\d+)"',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, html)
+            if match:
+                return int(match.group(1))
+        return 0
+
+    def _extract_region_id(self, html: str, url: str) -> int:
+        city_match = re.search(r'"cityInfo\(\{\\"id\\":\\"([^"\\]+)\\"\}\)"', html)
+        if city_match:
+            return self._resolve_city_region_sync(city_match.group(1))
+        path_match = re.search(r"afisha\.yandex\.ru/([a-z0-9-]+)/", url)
+        if path_match:
+            return self._resolve_city_region_sync(path_match.group(1))
+        return 47
 
     async def resolve_afisha_page(self, url: str) -> AfishaPageInfo:
         response = await self._client.get(url)
@@ -151,10 +169,7 @@ class AfishaClient:
             title_match = re.search(r"<title>Билеты на «([^»]+)»", html)
         title = title_match.group(1) if title_match else "Событие на Афише"
 
-        city_match = re.search(r'"cityInfo\(\{\\"id\\":\\"([^"\\]+)\\"\}\)"', html)
-        region_id = 47
-        if city_match:
-            region_id = await self._resolve_city_region(city_match.group(1))
+        region_id = self._extract_region_id(html, url)
 
         return AfishaPageInfo(title=title, region_id=region_id, source_url=url)
 
@@ -222,12 +237,17 @@ class AfishaClient:
         return None
 
     async def _resolve_city_region(self, city_slug: str) -> int:
+        return self._resolve_city_region_sync(city_slug)
+
+    @staticmethod
+    def _resolve_city_region_sync(city_slug: str) -> int:
         city_map = {
             "moscow": 213,
             "saint-petersburg": 2,
             "spb": 2,
             "nizhny-novgorod": 47,
             "ekaterinburg": 54,
+            "yekaterinburg": 54,
         }
         return city_map.get(city_slug, 47)
 

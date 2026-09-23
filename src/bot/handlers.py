@@ -20,6 +20,7 @@ from src.bot.keyboards import (
 )
 from src.bot.states import AddEventStates, FilterPriceStates
 from src.config import Settings
+from src.db.models import TrackedEvent
 from src.db.repository import Database
 from src.parser.afisha_client import AfishaClient, AfishaParserError
 
@@ -378,6 +379,47 @@ def build_router(
             await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer("Ок")
 
+    async def _refresh_event_sectors(event_id: int) -> TrackedEvent | None:
+        event = await db.get_event(event_id)
+        if not event:
+            return None
+        if event.status != "active" or not event.session_key:
+            return event
+        snapshot = await db.get_latest_snapshot(event_id)
+        if snapshot and snapshot.lots:
+            await db.update_known_sectors(event_id, [lot.sector for lot in snapshot.lots])
+            return await db.get_event(event_id)
+        try:
+            sessions = await parser.list_sessions(
+                event.widget_event_id,
+                event.region_id,
+                event.client_key,
+                event.session_datetime[:10] if event.session_datetime else "",
+                event.session_datetime[:10] if event.session_datetime else "",
+            )
+            session = next((s for s in sessions if s.key == event.session_key), None)
+            if not session:
+                meta, discovered = await parser.discover_sessions(
+                    event.widget_event_id,
+                    event.region_id,
+                    event.client_key or None,
+                )
+                session = next((s for s in discovered if s.key == event.session_key), None)
+            if session:
+                live = await parser.fetch_ticket_snapshot(
+                    event.session_key,
+                    event.client_key,
+                    session.sale_status,
+                    session.available_seat_count,
+                )
+                if live.lots:
+                    await db.update_known_sectors(event_id, [lot.sector for lot in live.lots])
+                    await db.save_snapshot(event_id, live)
+                    return await db.get_event(event_id)
+        except Exception:
+            logger.exception("Не удалось обновить сектора для события %s", event_id)
+        return event
+
     @router.callback_query(F.data.startswith("filt:"))
     async def filters_menu(callback: CallbackQuery, state: FSMContext) -> None:
         if not callback.from_user or not _is_super_admin(callback.from_user.id, settings):
@@ -389,14 +431,25 @@ def build_router(
         if not event:
             await callback.answer("Событие не найдено", show_alert=True)
             return
-        snapshot = await db.get_latest_snapshot(event_id)
-        if snapshot:
-            await db.update_known_sectors(event_id, [lot.sector for lot in snapshot.lots])
-            event = await db.get_event(event_id) or event
+        if event.status != "active" or not event.session_key:
+            await callback.answer(
+                "Мониторинг билетов ещё не запущен (ожидание виджета или сеанса). "
+                "Сектора появятся после активации.",
+                show_alert=True,
+            )
+        event = await _refresh_event_sectors(event_id) or event
+        status_line = ""
+        if event.status != "active" or not event.session_key:
+            status_line = (
+                f"\n\nСтатус: {event.status}"
+                f"{f' ({event.pending_reason})' if event.pending_reason else ''}."
+                " Парсинг схемы зала начнётся после привязки виджета и сеанса."
+            )
         if callback.message:
             await callback.message.edit_text(
                 f"Фильтры оповещений\n{event.title}\n\n"
-                "Цена — с учётом сервисного сбора. Снимки в БД хранятся полностью.",
+                "Цена — с учётом сервисного сбора. Снимки в БД хранятся полностью."
+                f"{status_line}",
                 reply_markup=filters_menu_keyboard(event),
             )
         await callback.answer()
@@ -527,14 +580,19 @@ def build_router(
         if not event:
             await callback.answer("Событие не найдено", show_alert=True)
             return
-        snapshot = await db.get_latest_snapshot(event_id)
-        if snapshot:
-            await db.update_known_sectors(event_id, [lot.sector for lot in snapshot.lots])
-            event = await db.get_event(event_id) or event
+        if event.status != "active" or not event.session_key:
+            await callback.answer(
+                "Сектора будут доступны после запуска мониторинга (событие в ожидании).",
+                show_alert=True,
+            )
+        event = await _refresh_event_sectors(event_id) or event
+        hint = ""
+        if not (event.known_sectors or []):
+            hint = "\n\nСписок секторов пуст: дождитесь первого успешного парсинга схемы зала."
         if callback.message:
             await callback.message.edit_text(
                 "Нажмите сектор, чтобы исключить или снова включить в оповещения:\n"
-                "✅ — в оповещениях, ❌ — исключён",
+                f"✅ — в оповещениях, ❌ — исключён{hint}",
                 reply_markup=sectors_keyboard(event),
             )
         await callback.answer()
