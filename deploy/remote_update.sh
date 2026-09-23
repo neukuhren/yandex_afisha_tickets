@@ -20,8 +20,13 @@ git config --global --add safe.directory "\$APP_DIR" 2>/dev/null || true
 
 if [ -d "\$APP_DIR/.git" ]; then
   cd "\$APP_DIR"
-  git fetch origin "\$BRANCH"
-  git checkout "\$BRANCH"
+  git fetch origin "\$BRANCH" || git fetch origin
+  if git show-ref --verify --quiet "refs/remotes/origin/\$BRANCH"; then
+    git checkout -B "\$BRANCH" "origin/\$BRANCH"
+  else
+    git fetch origin "\$BRANCH:refs/remotes/origin/\$BRANCH"
+    git checkout -B "\$BRANCH" "origin/\$BRANCH"
+  fi
   git reset --hard "origin/\$BRANCH"
 else
   mkdir -p "\$APP_DIR"
