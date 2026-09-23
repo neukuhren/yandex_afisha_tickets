@@ -357,7 +357,10 @@ class AfishaClient:
         if available_seat_count <= 0 and session_sale_status in {"no-seats", "closed", "sold-out"}:
             return TicketSnapshot(lots=[], sale_status=session_sale_status, total_count=0)
 
-        headers = self._headers_for(client_key)
+        headers = {
+            **self._headers_for(client_key),
+            "Accept-Encoding": "identity",
+        }
         url = (
             f"{self.WIDGET_HOST}/api/tickets/v1/sessions/{session_key}/hallplan/async"
             f"?clientKey={client_key}"
@@ -366,6 +369,12 @@ class AfishaClient:
         response.raise_for_status()
         payload = response.json()
         if payload.get("status") != "success":
+            code = payload.get("status_code") or payload.get("statusCode")
+            if code == "missing-antibot-token":
+                raise AfishaParserError(
+                    "Виджет требует antibot-токен для схемы зала (hallplan). "
+                    "Мониторинг по секторам временно недоступен с сервера."
+                )
             raise AfishaParserError(f"Ошибка hallplan: {payload}")
 
         result = payload["result"]
