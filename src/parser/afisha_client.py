@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -73,6 +74,7 @@ class AfishaClient:
             follow_redirects=True,
         )
         self._config_cache: dict[str, dict[str, Any]] = {}
+        self._antibot_cache: dict[str, tuple[str, float]] = {}
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -347,35 +349,83 @@ class AfishaClient:
                 )
         return sessions
 
+    async def _ensure_widget_headers(
+        self,
+        client_key: str,
+        widget_event_id: int | None,
+        region_id: int | None,
+    ) -> dict[str, str]:
+        if widget_event_id and region_id:
+            await self._load_widget_config(widget_event_id, region_id, client_key)
+        return self._headers_for(client_key)
+
+    async def _fetch_antibot_jwt(self, session_key: str, client_key: str) -> str:
+        cached = self._antibot_cache.get(session_key)
+        if cached and cached[1] > time.time():
+            return cached[0]
+
+        headers = {
+            **self._headers_for(client_key),
+            "Accept-Encoding": "identity",
+            "Content-Type": "application/json",
+        }
+        response = await self._client.post(
+            f"{self.WIDGET_HOST}/api/antibot/check?clientKey={client_key}",
+            headers=headers,
+            json={"sessionKey": session_key},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        jwt = payload.get("jwt")
+        if not jwt:
+            raise AfishaParserError(f"Нет JWT в ответе antibot/check: {payload}")
+
+        self._antibot_cache[session_key] = (jwt, time.time() + 3500)
+        return jwt
+
     async def fetch_ticket_snapshot(
         self,
         session_key: str,
         client_key: str,
         session_sale_status: str,
         available_seat_count: int,
+        *,
+        widget_event_id: int | None = None,
+        region_id: int | None = None,
     ) -> TicketSnapshot:
         if available_seat_count <= 0 and session_sale_status in {"no-seats", "closed", "sold-out"}:
             return TicketSnapshot(lots=[], sale_status=session_sale_status, total_count=0)
 
+        await self._ensure_widget_headers(client_key, widget_event_id, region_id)
+        antibot_jwt = await self._fetch_antibot_jwt(session_key, client_key)
+
         headers = {
             **self._headers_for(client_key),
             "Accept-Encoding": "identity",
+            "X-Antibot-Token": antibot_jwt,
         }
         url = (
             f"{self.WIDGET_HOST}/api/tickets/v1/sessions/{session_key}/hallplan/async"
             f"?clientKey={client_key}"
         )
         response = await self._client.get(url, headers=headers)
+        if response.status_code == 403:
+            self._antibot_cache.pop(session_key, None)
+            raise AfishaParserError("Доступ к hallplan запрещён (403)")
+
         response.raise_for_status()
         payload = response.json()
         if payload.get("status") != "success":
             code = payload.get("status_code") or payload.get("statusCode")
-            if code == "missing-antibot-token":
-                raise AfishaParserError(
-                    "Виджет требует antibot-токен для схемы зала (hallplan). "
-                    "Мониторинг по секторам временно недоступен с сервера."
-                )
-            raise AfishaParserError(f"Ошибка hallplan: {payload}")
+            if code in {"missing-antibot-token", "antibot-token-mismatch"}:
+                self._antibot_cache.pop(session_key, None)
+                antibot_jwt = await self._fetch_antibot_jwt(session_key, client_key)
+                headers["X-Antibot-Token"] = antibot_jwt
+                response = await self._client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+            if payload.get("status") != "success":
+                raise AfishaParserError(f"Ошибка hallplan: {payload}")
 
         result = payload["result"]
         sale_status = result.get("saleStatus", session_sale_status)

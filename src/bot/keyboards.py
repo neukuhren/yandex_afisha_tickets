@@ -106,7 +106,7 @@ def sectors_keyboard(event: TrackedEvent) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="Сектора появятся после первого парсинга",
+                    text="Сектора ещё не загружены (ожидайте парсинг)",
                     callback_data=f"filt:{event.id}",
                 )
             ]

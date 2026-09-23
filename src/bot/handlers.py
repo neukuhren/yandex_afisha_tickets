@@ -411,6 +411,8 @@ def build_router(
                     event.client_key,
                     session.sale_status,
                     session.available_seat_count,
+                    widget_event_id=event.widget_event_id,
+                    region_id=event.region_id,
                 )
                 if live.lots:
                     await db.update_known_sectors(event_id, [lot.sector for lot in live.lots])

@@ -122,6 +122,8 @@ class MonitorService:
             event.client_key,
             session.sale_status,
             session.available_seat_count,
+            widget_event_id=event.widget_event_id,
+            region_id=event.region_id,
         )
         previous = await self.db.get_latest_snapshot(event.id)
 
@@ -129,11 +131,27 @@ class MonitorService:
         if sectors:
             await self.db.update_known_sectors(event.id, sectors)
 
+        event = await self.db.get_event(event.id) or event
+        curr_filtered = filter_event_snapshot(event, current)
+
         if previous is None:
             await self.db.save_snapshot(event.id, current)
+            if curr_filtered.total_count > 0:
+                recipients = await self.db.list_notification_recipients(event.id)
+                if recipients:
+                    episode_key = self.notifier.build_episode_key(curr_filtered)
+                    await self.db.create_appearance_alerts(
+                        event.id,
+                        episode_key,
+                        recipients,
+                        self.settings.appearance_duration_seconds,
+                    )
+                    alerts = await self.db.get_active_appearance_alerts()
+                    event_alerts = [alert for alert in alerts if alert.event_id == event.id]
+                    for alert in event_alerts:
+                        await self.notifier.send_appearance_notification(event, current, alert)
             return
 
-        event = await self.db.get_event(event.id) or event
         prev_filtered = filter_event_snapshot(event, previous)
         curr_filtered = filter_event_snapshot(event, current)
 
