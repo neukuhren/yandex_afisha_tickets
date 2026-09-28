@@ -18,7 +18,7 @@ async def main() -> int:
     args = parser.parse_args()
 
     settings = get_settings()
-    db = Database(settings.database_url)
+    db = Database(settings)
     client = AfishaClient()
     try:
         resolved = await client.resolve_event_input(args.session_widget_url)
