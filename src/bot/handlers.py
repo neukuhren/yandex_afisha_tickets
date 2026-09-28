@@ -112,7 +112,10 @@ def build_router(
         if not message.from_user or not _is_super_admin(message.from_user.id, settings):
             return
         await state.set_state(AddEventStates.waiting_for_url)
-        await message.answer("Отправьте ссылку на событие Яндекс Афиши или виджет.")
+        await message.answer(
+            "Отправьте ссылку на событие Яндекс Афиши, виджет /w/events/… "
+            "или прямую ссылку на сеанс /w/sessions/… (например, с сайта РФС)."
+        )
 
     @router.message(AddEventStates.waiting_for_url)
     async def process_url(message: Message, state: FSMContext) -> None:
@@ -129,9 +132,17 @@ def build_router(
                 return
 
             resolved = await parser.resolve_event_input(url)
+            if resolved.direct_session:
+                duplicate = await db.get_event_by_session_key(resolved.direct_session.key)
+                if duplicate:
+                    await message.answer(
+                        f"Этот сеанс уже отслеживается как «{duplicate.title}»."
+                    )
+                    await state.clear()
+                    return
             if resolved.widget_event_id > 0:
                 duplicate = await db.get_event_by_widget_id(resolved.widget_event_id)
-                if duplicate:
+                if duplicate and not resolved.direct_session:
                     await message.answer(
                         f"Событие уже отслеживается как «{duplicate.title}»."
                     )
@@ -140,7 +151,9 @@ def build_router(
 
             sessions: list = []
             meta = None
-            if resolved.widget_event_id > 0:
+            if resolved.direct_session:
+                sessions = [resolved.direct_session]
+            elif resolved.widget_event_id > 0:
                 meta, sessions = await parser.discover_sessions(
                     resolved.widget_event_id,
                     resolved.region_id,
@@ -406,6 +419,14 @@ def build_router(
                 )
                 session = next((s for s in discovered if s.key == event.session_key), None)
             if session:
+                widget_url = None
+                if event.source_url and "/w/sessions/" in event.source_url:
+                    widget_url = event.source_url
+                elif event.session_key and event.client_key:
+                    widget_url = (
+                        f"https://widget.afisha.yandex.ru/w/sessions/{event.session_key}"
+                        f"?clientKey={event.client_key}"
+                    )
                 live = await parser.fetch_ticket_snapshot(
                     event.session_key,
                     event.client_key,
@@ -413,6 +434,7 @@ def build_router(
                     session.available_seat_count,
                     widget_event_id=event.widget_event_id,
                     region_id=event.region_id,
+                    widget_url=widget_url,
                 )
                 if live.lots:
                     await db.update_known_sectors(event_id, [lot.sector for lot in live.lots])

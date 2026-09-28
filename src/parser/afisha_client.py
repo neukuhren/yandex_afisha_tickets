@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -20,6 +21,13 @@ class ParsedWidgetUrl:
 
 
 @dataclass
+class ParsedSessionWidgetUrl:
+    session_key: str
+    client_key: str
+    region_id: int | None
+
+
+@dataclass
 class SessionInfo:
     key: str
     session_id: int
@@ -30,6 +38,7 @@ class SessionInfo:
     available_seat_count: int
     sale_status: str
     presentation_date: str
+    region_id: int = 47
 
 
 @dataclass
@@ -57,6 +66,7 @@ class ResolvedEventInput:
     client_key: str | None
     title: str
     is_afisha_page: bool
+    direct_session: SessionInfo | None = None
 
 
 class AfishaParserError(Exception):
@@ -70,7 +80,10 @@ class AfishaClient:
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
-            headers={"User-Agent": "Mozilla/5.0 (compatible; AfishaTicketBot/1.0)"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; AfishaTicketBot/1.0)",
+                "Accept-Encoding": "identity",
+            },
             follow_redirects=True,
         )
         self._config_cache: dict[str, dict[str, Any]] = {}
@@ -98,6 +111,41 @@ class AfishaClient:
             region_id=int(region_raw),
             client_key=client_key,
         )
+
+    @staticmethod
+    def parse_widget_session_url(url: str) -> ParsedSessionWidgetUrl:
+        parsed = urlparse(url)
+        if "widget.afisha.yandex.ru" not in parsed.netloc:
+            raise AfishaParserError("Это не ссылка на виджет Яндекс Афиши")
+
+        match = re.search(r"/sessions/([^/?#]+)", parsed.path)
+        if not match:
+            raise AfishaParserError("Не удалось извлечь ключ сеанса из ссылки виджета")
+
+        query = parse_qs(parsed.query)
+        client_key = (query.get("clientKey") or query.get("client_key") or [None])[0]
+        if not client_key:
+            raise AfishaParserError("В ссылке виджета сеанса нужен параметр clientKey")
+
+        region_raw = (query.get("regionId") or query.get("region_id") or [None])[0]
+        region_id = int(region_raw) if region_raw else None
+
+        return ParsedSessionWidgetUrl(
+            session_key=match.group(1),
+            client_key=client_key,
+            region_id=region_id,
+        )
+
+    @staticmethod
+    def decode_session_key(session_key: str) -> tuple[int, int, int, int]:
+        try:
+            decoded = base64.b64decode(session_key).decode("ascii")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise AfishaParserError("Некорректный ключ сеанса") from exc
+        parts = decoded.split("|")
+        if len(parts) < 4:
+            raise AfishaParserError("Некорректный формат ключа сеанса")
+        return int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
 
     async def resolve_afisha_url(self, url: str) -> ParsedWidgetUrl:
         response = await self._client.get(url)
@@ -176,6 +224,27 @@ class AfishaClient:
         return AfishaPageInfo(title=title, region_id=region_id, source_url=url)
 
     async def resolve_event_input(self, url: str) -> ResolvedEventInput:
+        if "widget.afisha.yandex.ru" in url and "/w/sessions/" in url:
+            parsed_session = self.parse_widget_session_url(url)
+            _, widget_event_id, _, _ = self.decode_session_key(parsed_session.session_key)
+            await self._load_widget_config_from_url(url)
+            session = await self.get_session_details(
+                parsed_session.session_key,
+                parsed_session.client_key,
+                widget_event_id=widget_event_id,
+            )
+            region_id = parsed_session.region_id or session.region_id
+            title = session.name or "Сеанс"
+            return ResolvedEventInput(
+                source_url=url,
+                widget_event_id=widget_event_id,
+                region_id=region_id,
+                client_key=parsed_session.client_key,
+                title=title,
+                is_afisha_page=False,
+                direct_session=session,
+            )
+
         if "widget.afisha.yandex.ru" in url:
             parsed = self.parse_widget_url(url)
             meta = await self.get_event_meta(parsed.event_id, parsed.region_id, parsed.client_key)
@@ -253,17 +322,7 @@ class AfishaClient:
         }
         return city_map.get(city_slug, 47)
 
-    async def _load_widget_config(
-        self, event_id: int, region_id: int, client_key: str | None
-    ) -> tuple[dict[str, str], str, str]:
-        if client_key:
-            widget_url = (
-                f"{self.WIDGET_HOST}/w/events/{event_id}"
-                f"?regionId={region_id}&clientKey={client_key}"
-            )
-        else:
-            widget_url = f"{self.WIDGET_HOST}/w/events/{event_id}?regionId={region_id}"
-
+    async def _load_widget_config_from_url(self, widget_url: str) -> tuple[dict[str, str], str, str]:
         response = await self._client.get(widget_url)
         response.raise_for_status()
         html = response.text
@@ -277,11 +336,25 @@ class AfishaClient:
             "User-Agent": "Mozilla/5.0 (compatible; AfishaTicketBot/1.0)",
             **config["fetch"]["defaultHeaders"],
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
             "Referer": widget_url,
         }
         resolved_client_key = config["clientKey"]["id"]
         self._config_cache[resolved_client_key] = headers
         return headers, resolved_client_key, widget_url
+
+    async def _load_widget_config(
+        self, event_id: int, region_id: int, client_key: str | None
+    ) -> tuple[dict[str, str], str, str]:
+        if client_key:
+            widget_url = (
+                f"{self.WIDGET_HOST}/w/events/{event_id}"
+                f"?regionId={region_id}&clientKey={client_key}"
+            )
+        else:
+            widget_url = f"{self.WIDGET_HOST}/w/events/{event_id}?regionId={region_id}"
+
+        return await self._load_widget_config_from_url(widget_url)
 
     def _headers_for(self, client_key: str) -> dict[str, str]:
         return self._config_cache.get(client_key, {"User-Agent": "Mozilla/5.0"})
@@ -354,10 +427,75 @@ class AfishaClient:
         client_key: str,
         widget_event_id: int | None,
         region_id: int | None,
+        *,
+        widget_url: str | None = None,
     ) -> dict[str, str]:
-        if widget_event_id and region_id:
+        if widget_url:
+            await self._load_widget_config_from_url(widget_url)
+        elif widget_event_id and region_id:
             await self._load_widget_config(widget_event_id, region_id, client_key)
         return self._headers_for(client_key)
+
+    async def _read_json_response(self, response: httpx.Response) -> dict[str, Any]:
+        if response.is_stream_consumed:
+            raw = response.content
+        else:
+            raw = b"".join([chunk async for chunk in response.aiter_raw()])
+        if not raw:
+            raise AfishaParserError(f"Пустой ответ API (HTTP {response.status_code})")
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            preview = raw[:200].decode("utf-8", errors="replace")
+            raise AfishaParserError(
+                f"Ответ API не JSON (HTTP {response.status_code}): {preview}"
+            ) from exc
+
+    async def get_session_details(
+        self,
+        session_key: str,
+        client_key: str,
+        *,
+        widget_event_id: int | None = None,
+        region_id: int | None = None,
+    ) -> SessionInfo:
+        await self._ensure_widget_headers(
+            client_key,
+            widget_event_id,
+            region_id,
+            widget_url=f"{self.WIDGET_HOST}/w/sessions/{session_key}?clientKey={client_key}",
+        )
+        headers = self._headers_for(client_key)
+        url = f"{self.WIDGET_HOST}/api/tickets/v1/sessions/{session_key}?clientKey={client_key}"
+        response = await self._client.get(url, headers=headers)
+        response.raise_for_status()
+        payload = await self._read_json_response(response)
+        if payload.get("status") != "success":
+            raise AfishaParserError(f"Ошибка API сеанса: {payload}")
+
+        session = payload["result"]["session"]
+        venue = session.get("venue") or {}
+        city = venue.get("city") or {}
+        region_from_api = city.get("regionId") or city.get("region_id")
+        event_block = session.get("event") or {}
+        name = (
+            session.get("name")
+            or session.get("eventName")
+            or event_block.get("name")
+            or "Сеанс"
+        )
+        return SessionInfo(
+            key=session_key,
+            session_id=int(session["id"]),
+            name=name,
+            session_date=session.get("sessionDate", ""),
+            venue_name=venue.get("name", ""),
+            venue_address=venue.get("address", ""),
+            available_seat_count=int(session.get("availableSeatCount") or 0),
+            sale_status=session.get("saleStatus", "unknown"),
+            presentation_date=session.get("presentationSessionDate", ""),
+            region_id=int(region_from_api) if region_from_api else (region_id or 47),
+        )
 
     async def _fetch_antibot_jwt(self, session_key: str, client_key: str) -> str:
         cached = self._antibot_cache.get(session_key)
@@ -375,7 +513,7 @@ class AfishaClient:
             json={"sessionKey": session_key},
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = await self._read_json_response(response)
         jwt = payload.get("jwt")
         if not jwt:
             raise AfishaParserError(f"Нет JWT в ответе antibot/check: {payload}")
@@ -392,11 +530,17 @@ class AfishaClient:
         *,
         widget_event_id: int | None = None,
         region_id: int | None = None,
+        widget_url: str | None = None,
     ) -> TicketSnapshot:
         if available_seat_count <= 0 and session_sale_status in {"no-seats", "closed", "sold-out"}:
             return TicketSnapshot(lots=[], sale_status=session_sale_status, total_count=0)
 
-        await self._ensure_widget_headers(client_key, widget_event_id, region_id)
+        await self._ensure_widget_headers(
+            client_key,
+            widget_event_id,
+            region_id,
+            widget_url=widget_url,
+        )
         antibot_jwt = await self._fetch_antibot_jwt(session_key, client_key)
 
         headers = {
@@ -408,24 +552,27 @@ class AfishaClient:
             f"{self.WIDGET_HOST}/api/tickets/v1/sessions/{session_key}/hallplan/async"
             f"?clientKey={client_key}"
         )
-        response = await self._client.get(url, headers=headers)
-        if response.status_code == 403:
-            self._antibot_cache.pop(session_key, None)
-            raise AfishaParserError("Доступ к hallplan запрещён (403)")
+        async with self._client.stream("GET", url, headers=headers) as response:
+            if response.status_code == 403:
+                self._antibot_cache.pop(session_key, None)
+                raise AfishaParserError("Доступ к hallplan запрещён (403)")
+            payload = await self._read_json_response(response)
+            if response.status_code >= 500:
+                response.raise_for_status()
 
-        response.raise_for_status()
-        payload = response.json()
         if payload.get("status") != "success":
             code = payload.get("status_code") or payload.get("statusCode")
             if code in {"missing-antibot-token", "antibot-token-mismatch"}:
                 self._antibot_cache.pop(session_key, None)
                 antibot_jwt = await self._fetch_antibot_jwt(session_key, client_key)
                 headers["X-Antibot-Token"] = antibot_jwt
-                response = await self._client.get(url, headers=headers)
-                response.raise_for_status()
-                payload = response.json()
+                async with self._client.stream("GET", url, headers=headers) as response:
+                    payload = await self._read_json_response(response)
+                    if response.status_code >= 500:
+                        response.raise_for_status()
             if payload.get("status") != "success":
-                raise AfishaParserError(f"Ошибка hallplan: {payload}")
+                message = payload.get("message") or payload.get("status_code") or payload
+                raise AfishaParserError(f"Ошибка hallplan: {message}")
 
         result = payload["result"]
         sale_status = result.get("saleStatus", session_sale_status)

@@ -117,6 +117,15 @@ class MonitorService:
                 logger.warning("Сеанс не найден для события %s", event.id)
                 return
 
+        widget_url = None
+        if event.source_url and "/w/sessions/" in event.source_url:
+            widget_url = event.source_url
+        elif event.session_key and event.client_key:
+            widget_url = (
+                f"https://widget.afisha.yandex.ru/w/sessions/{event.session_key}"
+                f"?clientKey={event.client_key}"
+            )
+
         current = await self.parser.fetch_ticket_snapshot(
             event.session_key,
             event.client_key,
@@ -124,6 +133,7 @@ class MonitorService:
             session.available_seat_count,
             widget_event_id=event.widget_event_id,
             region_id=event.region_id,
+            widget_url=widget_url,
         )
         previous = await self.db.get_latest_snapshot(event.id)
 

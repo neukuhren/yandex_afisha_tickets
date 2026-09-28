@@ -145,6 +145,37 @@ class Database:
                 select(TrackedEvent).where(TrackedEvent.widget_event_id == widget_event_id)
             )
 
+    async def get_event_by_session_key(self, session_key: str) -> TrackedEvent | None:
+        if not session_key:
+            return None
+        async with self.session_factory() as session:
+            return await session.scalar(
+                select(TrackedEvent).where(TrackedEvent.session_key == session_key)
+            )
+
+    async def update_event_sales_channel(
+        self,
+        event_id: int,
+        *,
+        source_url: str,
+        widget_event_id: int,
+        region_id: int,
+        client_key: str,
+        session_key: str,
+        session_id: int,
+    ) -> None:
+        async with self.session_factory() as session:
+            event = await session.scalar(select(TrackedEvent).where(TrackedEvent.id == event_id))
+            if not event:
+                return
+            event.source_url = source_url
+            event.widget_event_id = widget_event_id
+            event.region_id = region_id
+            event.client_key = client_key
+            event.session_key = session_key
+            event.session_id = session_id
+            await session.commit()
+
     async def create_event(
         self,
         *,
