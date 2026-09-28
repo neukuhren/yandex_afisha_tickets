@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -10,7 +11,9 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from src.parser.aggregator import TicketSnapshot, aggregate_hallplan
+from src.parser.aggregator import TicketLot, TicketSnapshot, aggregate_hallplan
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -87,7 +90,7 @@ class AfishaClient:
             follow_redirects=True,
         )
         self._config_cache: dict[str, dict[str, Any]] = {}
-        self._antibot_cache: dict[str, tuple[str, float]] = {}
+        self._antibot_cache: dict[str, tuple[str, float, bool]] = {}
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -497,10 +500,10 @@ class AfishaClient:
             region_id=int(region_from_api) if region_from_api else (region_id or 47),
         )
 
-    async def _fetch_antibot_jwt(self, session_key: str, client_key: str) -> str:
+    async def _fetch_antibot_state(self, session_key: str, client_key: str) -> tuple[str, bool]:
         cached = self._antibot_cache.get(session_key)
         if cached and cached[1] > time.time():
-            return cached[0]
+            return cached[0], cached[2]
 
         headers = {
             **self._headers_for(client_key),
@@ -518,8 +521,76 @@ class AfishaClient:
         if not jwt:
             raise AfishaParserError(f"Нет JWT в ответе antibot/check: {payload}")
 
-        self._antibot_cache[session_key] = (jwt, time.time() + 3500)
-        return jwt
+        captcha_required = bool(
+            payload.get("captchaRequired")
+            or payload.get("authorizationStatus") == "captcha_required"
+        )
+        self._antibot_cache[session_key] = (jwt, time.time() + 3500, captcha_required)
+        return jwt, captcha_required
+
+    async def _load_session_api_payload(self, session_key: str, client_key: str) -> dict[str, Any]:
+        headers = self._headers_for(client_key)
+        url = f"{self.WIDGET_HOST}/api/tickets/v1/sessions/{session_key}?clientKey={client_key}"
+        response = await self._client.get(url, headers=headers)
+        response.raise_for_status()
+        payload = await self._read_json_response(response)
+        if payload.get("status") != "success":
+            raise AfishaParserError(f"Ошибка API сеанса: {payload}")
+        return payload["result"]["session"]
+
+    @staticmethod
+    def _summary_snapshot_from_session(session: dict[str, Any]) -> TicketSnapshot:
+        available = int(session.get("availableSeatCount") or 0)
+        sale_status = session.get("saleStatus", "unknown")
+        if available <= 0:
+            return TicketSnapshot(lots=[], sale_status=sale_status, total_count=0)
+
+        prices = session.get("prices") or []
+        if not prices:
+            return TicketSnapshot(lots=[], sale_status=sale_status, total_count=available)
+
+        lots: list[TicketLot] = []
+        for item in prices:
+            price_kopecks = int(item.get("value") or 0)
+            if price_kopecks <= 0:
+                continue
+            lots.append(
+                TicketLot(
+                    sector="Сводка (карта зала недоступна)",
+                    price_kopecks=price_kopecks,
+                    fee_kopecks=0,
+                    count=available,
+                )
+            )
+        if not lots:
+            return TicketSnapshot(lots=[], sale_status=sale_status, total_count=available)
+
+        min_price = min(lot.price_kopecks for lot in lots)
+        lots = [
+            TicketLot(
+                sector="Сводка (карта зала недоступна)",
+                price_kopecks=min_price,
+                fee_kopecks=0,
+                count=available,
+            )
+        ]
+        return TicketSnapshot(lots=lots, sale_status=sale_status, total_count=available)
+
+    async def _fetch_session_summary_snapshot(
+        self,
+        session_key: str,
+        client_key: str,
+        session_sale_status: str,
+    ) -> TicketSnapshot:
+        session = await self._load_session_api_payload(session_key, client_key)
+        snapshot = self._summary_snapshot_from_session(session)
+        if snapshot.sale_status == "unknown":
+            snapshot.sale_status = session_sale_status
+        logger.warning(
+            "Hallplan недоступен (капча/ограничение API), используем сводку сеанса: %s мест",
+            snapshot.total_count,
+        )
+        return snapshot
 
     async def fetch_ticket_snapshot(
         self,
@@ -541,7 +612,11 @@ class AfishaClient:
             region_id,
             widget_url=widget_url,
         )
-        antibot_jwt = await self._fetch_antibot_jwt(session_key, client_key)
+        antibot_jwt, captcha_required = await self._fetch_antibot_state(session_key, client_key)
+        if captcha_required:
+            return await self._fetch_session_summary_snapshot(
+                session_key, client_key, session_sale_status
+            )
 
         headers = {
             **self._headers_for(client_key),
@@ -564,7 +639,13 @@ class AfishaClient:
             code = payload.get("status_code") or payload.get("statusCode")
             if code in {"missing-antibot-token", "antibot-token-mismatch"}:
                 self._antibot_cache.pop(session_key, None)
-                antibot_jwt = await self._fetch_antibot_jwt(session_key, client_key)
+                antibot_jwt, captcha_required = await self._fetch_antibot_state(
+                    session_key, client_key
+                )
+                if captcha_required:
+                    return await self._fetch_session_summary_snapshot(
+                        session_key, client_key, session_sale_status
+                    )
                 headers["X-Antibot-Token"] = antibot_jwt
                 async with self._client.stream("GET", url, headers=headers) as response:
                     payload = await self._read_json_response(response)
@@ -572,6 +653,10 @@ class AfishaClient:
                         response.raise_for_status()
             if payload.get("status") != "success":
                 message = payload.get("message") or payload.get("status_code") or payload
+                if message == "not-found":
+                    return await self._fetch_session_summary_snapshot(
+                        session_key, client_key, session_sale_status
+                    )
                 raise AfishaParserError(f"Ошибка hallplan: {message}")
 
         result = payload["result"]
