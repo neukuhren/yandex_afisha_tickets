@@ -1,0 +1,39 @@
+name: Deploy bot to VPS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'main.py'
+      - 'requirements.txt'
+      - 'deploy/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER || 'root' }}
+          password: ${{ secrets.VPS_SSH_PASSWORD }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR=/opt/yandex_afisha_tickets
+            cd "$APP_DIR"
+            git config --global --add safe.directory "$APP_DIR" || true
+            git fetch --unshallow origin 2>/dev/null || true
+            git fetch origin refs/heads/master:refs/remotes/origin/master
+            git checkout -B master origin/master
+            git reset --hard origin/master
+            test -d .venv || python3 -m venv .venv
+            .venv/bin/pip install -r requirements.txt
+            chown -R afisha:afisha "$APP_DIR"
+            systemctl restart yandex-afisha-bot
+            systemctl is-active yandex-afisha-bot
+            git log -1 --oneline
