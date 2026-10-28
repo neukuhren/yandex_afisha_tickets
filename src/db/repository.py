@@ -131,27 +131,34 @@ class Database:
                 select(TrackedEvent).where(TrackedEvent.id == event_id)
             )
 
-    async def get_event_by_url(self, source_url: str) -> TrackedEvent | None:
+    async def get_event_by_url(self, source_url: str, *, active_only: bool = False) -> TrackedEvent | None:
         async with self.session_factory() as session:
-            return await session.scalar(
-                select(TrackedEvent).where(TrackedEvent.source_url == source_url)
-            )
+            query = select(TrackedEvent).where(TrackedEvent.source_url == source_url)
+            if active_only:
+                query = query.where(TrackedEvent.is_active.is_(True))
+            return await session.scalar(query)
 
-    async def get_event_by_widget_id(self, widget_event_id: int) -> TrackedEvent | None:
+    async def get_event_by_widget_id(
+        self, widget_event_id: int, *, active_only: bool = False
+    ) -> TrackedEvent | None:
         if widget_event_id <= 0:
             return None
         async with self.session_factory() as session:
-            return await session.scalar(
-                select(TrackedEvent).where(TrackedEvent.widget_event_id == widget_event_id)
-            )
+            query = select(TrackedEvent).where(TrackedEvent.widget_event_id == widget_event_id)
+            if active_only:
+                query = query.where(TrackedEvent.is_active.is_(True))
+            return await session.scalar(query)
 
-    async def get_event_by_session_key(self, session_key: str) -> TrackedEvent | None:
+    async def get_event_by_session_key(
+        self, session_key: str, *, active_only: bool = False
+    ) -> TrackedEvent | None:
         if not session_key:
             return None
         async with self.session_factory() as session:
-            return await session.scalar(
-                select(TrackedEvent).where(TrackedEvent.session_key == session_key)
-            )
+            query = select(TrackedEvent).where(TrackedEvent.session_key == session_key)
+            if active_only:
+                query = query.where(TrackedEvent.is_active.is_(True))
+            return await session.scalar(query)
 
     async def update_event_sales_channel(
         self,
@@ -193,29 +200,66 @@ class Database:
         pending_reason: str | None = None,
     ) -> TrackedEvent:
         async with self.session_factory() as session:
-            event = TrackedEvent(
-                source_url=source_url,
-                widget_event_id=widget_event_id,
-                region_id=region_id,
-                client_key=client_key,
-                session_key=session_key,
-                session_id=session_id,
-                title=title,
-                venue_name=venue_name,
-                venue_address=venue_address,
-                session_datetime=session_datetime,
-                status=status,
-                pending_reason=pending_reason,
-                pending_sessions=None,
+            existing = await session.scalar(
+                select(TrackedEvent).where(TrackedEvent.source_url == source_url)
             )
-            session.add(event)
-            await session.flush()
+            if existing and existing.is_active:
+                existing.widget_event_id = widget_event_id
+                existing.region_id = region_id
+                existing.client_key = client_key
+                existing.session_key = session_key
+                existing.session_id = session_id
+                existing.title = title
+                existing.venue_name = venue_name
+                existing.venue_address = venue_address
+                existing.session_datetime = session_datetime
+                existing.status = status
+                existing.pending_reason = pending_reason
+                existing.pending_sessions = None
+                event = existing
+            elif existing and not existing.is_active:
+                existing.widget_event_id = widget_event_id
+                existing.region_id = region_id
+                existing.client_key = client_key
+                existing.session_key = session_key
+                existing.session_id = session_id
+                existing.title = title
+                existing.venue_name = venue_name
+                existing.venue_address = venue_address
+                existing.session_datetime = session_datetime
+                existing.status = status
+                existing.pending_reason = pending_reason
+                existing.pending_sessions = None
+                existing.is_active = True
+                event = existing
+            else:
+                event = TrackedEvent(
+                    source_url=source_url,
+                    widget_event_id=widget_event_id,
+                    region_id=region_id,
+                    client_key=client_key,
+                    session_key=session_key,
+                    session_id=session_id,
+                    title=title,
+                    venue_name=venue_name,
+                    venue_address=venue_address,
+                    session_datetime=session_datetime,
+                    status=status,
+                    pending_reason=pending_reason,
+                    pending_sessions=None,
+                )
+                session.add(event)
+                await session.flush()
 
-            users = await session.scalars(select(BotUser))
-            for user in users:
+            user_ids = {u.id for u in (await session.scalars(select(BotUser))).all()}
+            subs = await session.scalars(
+                select(UserEventSubscription).where(UserEventSubscription.event_id == event.id)
+            )
+            subscribed = {s.user_id for s in subs.all()}
+            for user_id in user_ids - subscribed:
                 session.add(
                     UserEventSubscription(
-                        user_id=user.id,
+                        user_id=user_id,
                         event_id=event.id,
                         notifications_enabled=True,
                     )

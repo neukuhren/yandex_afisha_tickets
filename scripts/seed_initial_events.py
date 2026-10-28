@@ -18,14 +18,14 @@ INITIAL_URLS = [
 
 
 async def seed_url(db: Database, parser: AfishaClient, url: str) -> None:
-    existing = await db.get_event_by_url(url)
+    existing = await db.get_event_by_url(url, active_only=True)
     if existing:
         logger.info("Уже есть: %s", url)
         return
 
     resolved = await parser.resolve_event_input(url)
     if resolved.widget_event_id > 0:
-        duplicate = await db.get_event_by_widget_id(resolved.widget_event_id)
+        duplicate = await db.get_event_by_widget_id(resolved.widget_event_id, active_only=True)
         if duplicate:
             logger.info("Уже отслеживается по widget id: %s", resolved.widget_event_id)
             return

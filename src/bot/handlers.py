@@ -125,7 +125,7 @@ def build_router(
 
         url = message.text.strip()
         try:
-            existing = await db.get_event_by_url(url)
+            existing = await db.get_event_by_url(url, active_only=True)
             if existing:
                 await message.answer("Это событие уже отслеживается.")
                 await state.clear()
@@ -133,7 +133,9 @@ def build_router(
 
             resolved = await parser.resolve_event_input(url)
             if resolved.direct_session:
-                duplicate = await db.get_event_by_session_key(resolved.direct_session.key)
+                duplicate = await db.get_event_by_session_key(
+                    resolved.direct_session.key, active_only=True
+                )
                 if duplicate:
                     await message.answer(
                         f"Этот сеанс уже отслеживается как «{duplicate.title}»."
@@ -141,7 +143,9 @@ def build_router(
                     await state.clear()
                     return
             if resolved.widget_event_id > 0:
-                duplicate = await db.get_event_by_widget_id(resolved.widget_event_id)
+                duplicate = await db.get_event_by_widget_id(
+                    resolved.widget_event_id, active_only=True
+                )
                 if duplicate and not resolved.direct_session:
                     await message.answer(
                         f"Событие уже отслеживается как «{duplicate.title}»."
@@ -227,7 +231,7 @@ def build_router(
             return
 
         session = sessions_data[index]
-        existing = await db.get_event_by_url(data["source_url"])
+        existing = await db.get_event_by_url(data["source_url"], active_only=True)
         if existing:
             if callback.message:
                 await callback.message.edit_text("Это событие уже отслеживается.")
