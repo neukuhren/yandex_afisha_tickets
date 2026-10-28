@@ -40,6 +40,9 @@ else
   cd "\$APP_DIR"
 fi
 
+# Перезапуск сразу после обновления кода — не ждём pip (он может долго висеть).
+systemctl restart yandex-afisha-bot || true
+
 if [ ! -d .venv ]; then
   python3 -m venv .venv
 fi
