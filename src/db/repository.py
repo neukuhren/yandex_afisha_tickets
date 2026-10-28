@@ -10,6 +10,7 @@ from src.config import Settings, all_admin_ids
 from src.db.migrations import run_migrations
 from src.db.models import AppearanceAlert, Base, BotUser, TicketSnapshotRow, TrackedEvent, UserEventSubscription
 from src.parser.aggregator import TicketLot, TicketSnapshot
+from src.utils.url import canonical_event_url
 
 
 class Database:
@@ -131,12 +132,21 @@ class Database:
                 select(TrackedEvent).where(TrackedEvent.id == event_id)
             )
 
+    async def _event_by_canonical_url(
+        self, session: AsyncSession, source_url: str, *, active_only: bool
+    ) -> TrackedEvent | None:
+        target = canonical_event_url(source_url)
+        query = select(TrackedEvent)
+        if active_only:
+            query = query.where(TrackedEvent.is_active.is_(True))
+        for event in await session.scalars(query):
+            if canonical_event_url(event.source_url) == target:
+                return event
+        return None
+
     async def get_event_by_url(self, source_url: str, *, active_only: bool = False) -> TrackedEvent | None:
         async with self.session_factory() as session:
-            query = select(TrackedEvent).where(TrackedEvent.source_url == source_url)
-            if active_only:
-                query = query.where(TrackedEvent.is_active.is_(True))
-            return await session.scalar(query)
+            return await self._event_by_canonical_url(session, source_url, active_only=active_only)
 
     async def get_event_by_widget_id(
         self, widget_event_id: int, *, active_only: bool = False
@@ -199,10 +209,9 @@ class Database:
         status: str = "active",
         pending_reason: str | None = None,
     ) -> TrackedEvent:
+        source_url = canonical_event_url(source_url)
         async with self.session_factory() as session:
-            existing = await session.scalar(
-                select(TrackedEvent).where(TrackedEvent.source_url == source_url)
-            )
+            existing = await self._event_by_canonical_url(session, source_url, active_only=False)
             if existing and existing.is_active:
                 existing.widget_event_id = widget_event_id
                 existing.region_id = region_id

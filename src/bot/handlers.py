@@ -23,6 +23,7 @@ from src.config import Settings
 from src.db.models import TrackedEvent
 from src.db.repository import Database
 from src.parser.afisha_client import AfishaClient, AfishaParserError
+from src.utils.url import canonical_event_url
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def build_router(
             await message.answer("Нужна ссылка текстом.")
             return
 
-        url = message.text.strip()
+        url = canonical_event_url(message.text.strip())
         try:
             existing = await db.get_event_by_url(url, active_only=True)
             if existing:
