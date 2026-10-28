@@ -126,8 +126,8 @@ def build_router(
 
         url = canonical_event_url(message.text.strip())
         try:
-            existing = await db.get_event_by_url(url, active_only=True)
-            if existing:
+            existing = await db.get_event_by_url(url, active_only=False)
+            if existing and existing.is_active:
                 await message.answer("Это событие уже отслеживается.")
                 await state.clear()
                 return
@@ -135,9 +135,9 @@ def build_router(
             resolved = await parser.resolve_event_input(url)
             if resolved.direct_session:
                 duplicate = await db.get_event_by_session_key(
-                    resolved.direct_session.key, active_only=True
+                    resolved.direct_session.key, active_only=False
                 )
-                if duplicate:
+                if duplicate and duplicate.is_active:
                     await message.answer(
                         f"Этот сеанс уже отслеживается как «{duplicate.title}»."
                     )
@@ -145,9 +145,9 @@ def build_router(
                     return
             if resolved.widget_event_id > 0:
                 duplicate = await db.get_event_by_widget_id(
-                    resolved.widget_event_id, active_only=True
+                    resolved.widget_event_id, active_only=False
                 )
-                if duplicate and not resolved.direct_session:
+                if duplicate and duplicate.is_active and not resolved.direct_session:
                     await message.answer(
                         f"Событие уже отслеживается как «{duplicate.title}»."
                     )
@@ -232,8 +232,8 @@ def build_router(
             return
 
         session = sessions_data[index]
-        existing = await db.get_event_by_url(data["source_url"], active_only=True)
-        if existing:
+        existing = await db.get_event_by_url(data["source_url"], active_only=False)
+        if existing and existing.is_active:
             if callback.message:
                 await callback.message.edit_text("Это событие уже отслеживается.")
             await state.clear()
